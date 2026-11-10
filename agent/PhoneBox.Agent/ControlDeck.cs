@@ -25,6 +25,10 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, (int Original, int Applied)> _duck = [];
     private int? _duckPercent;
     private readonly Dictionary<string, long> _sleep = [];
+    private readonly Lock _radioGate = new();
+    private readonly HashSet<string> _activeRadios = [];
+    private string? _lastRadioId;
+    private long _radioStartedAt, _radioElapsedMs;
     private Task? _hardwareJob;
     private long _hardwareAt;
     private IReadOnlyList<DeckMonitor> _monitors = [];
@@ -149,7 +153,10 @@ public sealed partial class ControlDeck : BackgroundService
                     ok = true;
                     foreach (var d in Audio().Devices) ok &= _native.Device(d.Id, null, true);
                     break;
-                case "sound-stop": _native.StopSound(string.IsNullOrEmpty(id) ? null : id); ok = true; break;
+                case "sound-stop":
+                    if (string.IsNullOrEmpty(id)) { StopAllRadios(clearLast: false); _native.StopSound(null); }
+                    else { StopRadio(id, clearLast: false); }
+                    ok = true; break;
                 case "action": return await Action(id, op, value, ct);
                 case "brightness": ok = value is >= 0 and <= 100 && _native.Brightness(id, value.Value); break;
                 case "desktop": ok = value is -1 or 1 && await _native.PlatformAction("desktop", "", null, value.Value, ct); break;
@@ -227,10 +234,17 @@ public sealed partial class ControlDeck : BackgroundService
                 return await ShortcutAction(c, action.Target, op, ct);
             case "keys": KeySender.SendKeys(action.Target); return new(true);
             case "text": KeySender.TypeText(action.Target); return new(true);
-            case "sound": case "radio":
+            case "sound":
                 if (op == "stop") _native.StopSound(action.Id);
                 else _native.Play(action.Id, action.Target, action.Device, Math.Clamp(action.Value, 0, 100));
                 return new(true);
+            case "radio":
+                if (op == "stop")
+                {
+                    StopRadio(action.Id, clearLast: false);
+                    return new(true);
+                }
+                return StartRadio(action) ? new(true) : new(false, "Radio stream is unavailable");
             case "midi":
                 if (!int.TryParse(action.Device, out var port)) return new(false, "Choose a MIDI output port");
                 _native.Midi(port, action.Target, value ?? action.Value); return new(true);
@@ -352,6 +366,152 @@ public sealed partial class ControlDeck : BackgroundService
                 _duck.Remove(id);
             }
             Invalidate();
+        }
+    }
+
+    public void StopAllRadios(string? exceptId = null, bool clearLast = true)
+    {
+        lock (_radioGate) StopAllRadiosCore(exceptId, clearLast);
+    }
+
+    private void StopAllRadiosCore(string? exceptId, bool clearLast)
+    {
+        var now = _now();
+        string[] tracked;
+        lock (_state)
+        {
+            tracked = _activeRadios.Where(id => id != exceptId).ToArray();
+            if (exceptId is null) _activeRadios.Clear();
+            else _activeRadios.RemoveWhere(id => id != exceptId);
+            if (clearLast && exceptId is null) { _lastRadioId = null; _radioStartedAt = 0; _radioElapsedMs = 0; }
+            else if (exceptId is null && _radioStartedAt > 0) { _radioElapsedMs = Math.Max(0, now - _radioStartedAt); _radioStartedAt = 0; }
+        }
+        var ids = _config.Get().Controls.Actions
+            .Where(a => a.Kind == "radio" && a.Id != exceptId).Select(a => a.Id)
+            .Concat(tracked).Distinct(StringComparer.Ordinal);
+        foreach (var radioId in ids) _native.StopSound(radioId);
+        Invalidate();
+    }
+
+    private void StopRadio(string id, bool clearLast = false)
+    {
+        lock (_radioGate)
+        {
+            var now = _now();
+            lock (_state)
+            {
+                var wasActive = _activeRadios.Remove(id);
+                if (clearLast && _lastRadioId == id) { _lastRadioId = null; _radioStartedAt = 0; _radioElapsedMs = 0; }
+                else if (_lastRadioId == id || wasActive)
+                {
+                    _lastRadioId = id;
+                    if (_radioStartedAt > 0) { _radioElapsedMs = Math.Max(0, now - _radioStartedAt); _radioStartedAt = 0; }
+                }
+            }
+            _native.StopSound(id);
+            Invalidate();
+        }
+    }
+
+    private bool StartRadio(DeckAction action)
+    {
+        lock (_radioGate)
+        {
+            StopAllRadiosCore(action.Id, clearLast: false);
+            try { _native.Play(action.Id, action.Target, action.Device, Math.Clamp(action.Value, 0, 100)); }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Radio stream {Id} failed to open", action.Id);
+                lock (_state) _activeRadios.Remove(action.Id);
+                Invalidate();
+                return false;
+            }
+            var nativeState = _native.ActionState(action);
+            var playing = nativeState is null || nativeState == "Playing";
+            var now = _now();
+            lock (_state)
+            {
+                if (playing) { _activeRadios.Add(action.Id); _lastRadioId = action.Id; _radioStartedAt = now; _radioElapsedMs = 0; }
+                else _activeRadios.Remove(action.Id);
+            }
+            Invalidate();
+            return playing;
+        }
+    }
+
+    internal bool IsRadioPlaying(DeckAction action) { lock (_state) return _activeRadios.Contains(action.Id); }
+
+    private DeckAction? GetPlayingRadioAction()
+    {
+        var radios = _config.Get().Controls.Actions.Where(a => a.Kind == "radio").ToArray();
+        if (radios.Length == 0) return null;
+        lock (_state)
+        {
+            if (_lastRadioId is not null && _activeRadios.Contains(_lastRadioId)
+                && radios.FirstOrDefault(a => a.Id == _lastRadioId) is { } preferred) return preferred;
+            foreach (var radio in radios)
+                if (_activeRadios.Contains(radio.Id))
+                {
+                    _lastRadioId = radio.Id;
+                    if (_radioStartedAt <= 0) _radioStartedAt = _now();
+                    return radio;
+                }
+        }
+        return null;
+    }
+
+    public MediaSnapshot? EffectiveMedia(MediaSnapshot? systemMedia)
+    {
+        if (GetPlayingRadioAction() is { } playing)
+        {
+            long startedAt;
+            lock (_state) { if (_radioStartedAt <= 0) _radioStartedAt = _now(); startedAt = _radioStartedAt; }
+            return new("Internet Radio", string.IsNullOrWhiteSpace(playing.Label) ? playing.Id : playing.Label,
+                "Live stream", "", true, Math.Max(0, _now() - startedAt), 0, 0, false);
+        }
+        if (systemMedia is { Playing: true })
+        {
+            lock (_state) { _lastRadioId = null; _radioStartedAt = 0; _radioElapsedMs = 0; }
+            return systemMedia;
+        }
+        string? pausedId; long elapsedMs;
+        lock (_state) { pausedId = _lastRadioId; elapsedMs = _radioElapsedMs; }
+        if (pausedId is not null && _config.Get().Controls.Actions.FirstOrDefault(a => a.Kind == "radio" && a.Id == pausedId) is { } paused)
+            return new("Internet Radio", string.IsNullOrWhiteSpace(paused.Label) ? paused.Id : paused.Label,
+                "Paused", "", false, elapsedMs, 0, 0, false);
+        return systemMedia;
+    }
+
+    public Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var radios = _config.Get().Controls.Actions.Where(a => a.Kind == "radio").ToArray();
+        if (radios.Length == 0) return Task.FromResult<bool?>(null);
+        var playing = GetPlayingRadioAction();
+        string? lastId; lock (_state) lastId = _lastRadioId;
+        var current = playing ?? (lastId is not null && systemMedia?.Playing != true ? radios.FirstOrDefault(a => a.Id == lastId) : null);
+        if (current is null) return Task.FromResult<bool?>(null);
+        var idx = Math.Max(0, Array.FindIndex(radios, a => a.Id == current.Id));
+        switch (action)
+        {
+            case "next":
+                for (var step = 1; step <= radios.Length; step++)
+                    if (StartRadio(radios[(idx + step) % radios.Length])) return Task.FromResult<bool?>(true);
+                return Task.FromResult<bool?>(false);
+            case "prev":
+                for (var step = 1; step <= radios.Length; step++)
+                    if (StartRadio(radios[(idx - step + radios.Length * step) % radios.Length])) return Task.FromResult<bool?>(true);
+                return Task.FromResult<bool?>(false);
+            case "playpause":
+                if (playing is not null) { StopRadio(playing.Id, clearLast: false); return Task.FromResult<bool?>(true); }
+                return Task.FromResult<bool?>(StartRadio(current));
+            case "play":
+                return Task.FromResult<bool?>(playing is not null || StartRadio(current));
+            case "pause" or "stop":
+                if (playing is not null) StopRadio(playing.Id, clearLast: false);
+                return Task.FromResult<bool?>(true);
+            default:
+                return Task.FromResult<bool?>(false);
         }
     }
 }
