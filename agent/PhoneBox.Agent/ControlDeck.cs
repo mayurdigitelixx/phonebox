@@ -136,7 +136,12 @@ public sealed partial class ControlDeck : BackgroundService
                 case "default":
                     if (op is not ("" or "all" or "media" or "communications" or "console")) return new(false, "Unknown audio role");
                     ok = _native.DefaultDevice(id, op switch { "media" => 1, "communications" => 2, "console" => 0, _ => null }); break;
-                case "media": ok = await _native.MediaAction(id, op, value ?? 0, ct); break;
+                case "media":
+                    var wasPlayingMedia = (await SafeMedia(ct)).Any(p => p.Id == id && p.Playing);
+                    ok = await _native.MediaAction(id, op, value ?? 0, ct);
+                    if (ok && (op is "play" or "next" or "prev" || (op == "playpause" && !wasPlayingMedia)))
+                        StopAllRadios(clearLast: true);
+                    break;
                 case "ptt":
                     if (op == "begin") { var token = _ptt.Begin(id); return new(token is not null, token is null ? "Microphone is unavailable" : null, token); }
                     ok = lease is not null && (op == "renew" ? _ptt.Renew(lease) : op == "end" && _ptt.End(lease)); break;
@@ -244,14 +249,20 @@ public sealed partial class ControlDeck : BackgroundService
                     StopRadio(action.Id, clearLast: false);
                     return new(true);
                 }
-                return StartRadio(action) ? new(true) : new(false, "Radio stream is unavailable");
+                if (!StartRadio(action)) return new(false, "Radio stream is unavailable");
+                await PauseActiveSystemMediaAsync(ct);
+                return new(true);
+            case "playlist":
+                if (_spotify is null) return new(false, "Spotify is unavailable");
+                var playlistRes = await _spotify.Act("playlist", action.Id, ct);
+                if (playlistRes.Ok) StopAllRadios(clearLast: true);
+                return playlistRes;
             case "midi":
                 if (!int.TryParse(action.Device, out var port)) return new(false, "Choose a MIDI output port");
                 _native.Midi(port, action.Target, value ?? action.Value); return new(true);
             case "osc":
                 await SendOsc(action.Device ?? "", action.Target, value ?? action.Value, ct); return new(true);
             case "workflow": return await Workflow(action, ct);
-            case "playlist": return _spotify is null ? new(false, "Spotify is unavailable") : await _spotify.Act("playlist", action.Id, ct);
             case "audio-route": return await RouteAudio(action, ct);
             case "mixer": case "mixer-mute": return MixerAction(action, value);
             default:
@@ -482,36 +493,54 @@ public sealed partial class ControlDeck : BackgroundService
         return systemMedia;
     }
 
-    public Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct)
+    public async Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var radios = _config.Get().Controls.Actions.Where(a => a.Kind == "radio").ToArray();
-        if (radios.Length == 0) return Task.FromResult<bool?>(null);
+        if (radios.Length == 0) return null;
         var playing = GetPlayingRadioAction();
         string? lastId; lock (_state) lastId = _lastRadioId;
         var current = playing ?? (lastId is not null && systemMedia?.Playing != true ? radios.FirstOrDefault(a => a.Id == lastId) : null);
-        if (current is null) return Task.FromResult<bool?>(null);
+        if (current is null) return null;
         var idx = Math.Max(0, Array.FindIndex(radios, a => a.Id == current.Id));
         switch (action)
         {
             case "next":
                 for (var step = 1; step <= radios.Length; step++)
-                    if (StartRadio(radios[(idx + step) % radios.Length])) return Task.FromResult<bool?>(true);
-                return Task.FromResult<bool?>(false);
+                    if (StartRadio(radios[(idx + step) % radios.Length])) { await PauseActiveSystemMediaAsync(ct); return true; }
+                return false;
             case "prev":
                 for (var step = 1; step <= radios.Length; step++)
-                    if (StartRadio(radios[(idx - step + radios.Length * step) % radios.Length])) return Task.FromResult<bool?>(true);
-                return Task.FromResult<bool?>(false);
+                    if (StartRadio(radios[(idx - step + radios.Length * step) % radios.Length])) { await PauseActiveSystemMediaAsync(ct); return true; }
+                return false;
             case "playpause":
-                if (playing is not null) { StopRadio(playing.Id, clearLast: false); return Task.FromResult<bool?>(true); }
-                return Task.FromResult<bool?>(StartRadio(current));
+                if (playing is not null) { StopRadio(playing.Id, clearLast: false); return true; }
+                if (StartRadio(current)) { await PauseActiveSystemMediaAsync(ct); return true; }
+                return false;
             case "play":
-                return Task.FromResult<bool?>(playing is not null || StartRadio(current));
+                if (playing is not null) return true;
+                if (StartRadio(current)) { await PauseActiveSystemMediaAsync(ct); return true; }
+                return false;
             case "pause" or "stop":
                 if (playing is not null) StopRadio(playing.Id, clearLast: false);
-                return Task.FromResult<bool?>(true);
+                return true;
             default:
-                return Task.FromResult<bool?>(false);
+                return false;
         }
+    }
+
+    private async Task PauseActiveSystemMediaAsync(CancellationToken ct)
+    {
+        foreach (var m in await SafeMedia(ct))
+        {
+            if (!m.Playing) continue;
+            try { await _native.MediaAction(m.Id, "pause", 0, ct); } catch { }
+        }
+    }
+
+    private async Task<IReadOnlyList<DeckMedia>> SafeMedia(CancellationToken ct)
+    {
+        try { return await _native.Media(ct); }
+        catch { return []; }
     }
 }

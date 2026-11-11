@@ -161,6 +161,20 @@ public sealed class ControlDeckTests
             Assert.Equal(true, await deck.TryControlRadioMediaAsync("next", idleSys, default));
             Assert.Equal(["r-fenomen"], native.PlayingRadios.ToArray());
             Assert.Equal("Radyo Fenomen", deck.EffectiveMedia(idleSys)!.Title);
+
+            // 9. Starting a radio pauses active system media ONLY after Play succeeds (not when Play fails).
+            native.MediaSessions = [new DeckMedia("Spotify.exe", "Spotify", "Song", true, 0, 100000, true, true, true, false, "None")];
+            native.PausedMediaIds.Clear();
+            Assert.False((await deck.Act("action", "r-power", "", null, null, null, default)).Ok);
+            Assert.Empty(native.PausedMediaIds);
+
+            Assert.True((await deck.Act("action", "r-kafa", "", null, null, null, default)).Ok);
+            Assert.Equal(["Spotify.exe"], native.PausedMediaIds.ToArray());
+
+            // 10. Resuming system media stops active radio streams.
+            native.MediaSessions = [new DeckMedia("Spotify.exe", "Spotify", "Song", false, 0, 100000, true, true, true, false, "None")];
+            Assert.True((await deck.Act("media", "Spotify.exe", "play", null, null, null, default)).Ok);
+            Assert.Empty(native.PlayingRadios);
         }
         finally
         {
@@ -172,6 +186,8 @@ public sealed class ControlDeckTests
     {
         public readonly HashSet<string> PlayingRadios = [];
         public readonly HashSet<string> FailingRadios = [];
+        public List<DeckMedia> MediaSessions = [];
+        public readonly List<string> PausedMediaIds = [];
 
         public DeckAudio Audio() => new(true, null, [], []);
         public bool Device(string id, int? volume, bool? muted, int? channel = null) => true;
@@ -184,8 +200,12 @@ public sealed class ControlDeckTests
         public string? ActionState(DeckAction action) => action.Kind is "sound" or "radio"
             ? (PlayingRadios.Contains(action.Id) ? "Playing" : "Stopped")
             : null;
-        public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct) => Task.FromResult<IReadOnlyList<DeckMedia>>([]);
-        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct) => Task.FromResult(true);
+        public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct) => Task.FromResult<IReadOnlyList<DeckMedia>>(MediaSessions);
+        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
+        {
+            if (action == "pause") PausedMediaIds.Add(id);
+            return Task.FromResult(true);
+        }
         public void Play(string id, string file, string? device, int volume)
         {
             if (FailingRadios.Contains(id)) throw new InvalidOperationException("Stream open failed");
