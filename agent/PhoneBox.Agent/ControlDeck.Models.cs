@@ -4,6 +4,7 @@ public sealed class ControlDeckConfig
 {
     public bool AllowListening { get; set; }
     public bool AllowPower { get; set; }
+    public bool AllowOnlineRadioLogos { get; set; }
     public List<DeckAction> Actions { get; set; } = [];
     public List<DeckProfile> Profiles { get; set; } = [];
     public string? SpotifyToken { get; set; }
@@ -24,6 +25,7 @@ public sealed class DeckAction
     public string? Argument { get; set; }
     public int Value { get; set; }
     public string? Device { get; set; }
+    public string? Icon { get; set; }
 }
 public sealed class DeckProfile
 {
