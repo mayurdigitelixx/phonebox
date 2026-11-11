@@ -84,7 +84,12 @@ app.MapGet("/api/controls/listen", async (HttpResponse response, ControlDeck dec
 app.MapPost("/api/controls/capture", (ControlDeck deck) => Results.Json(deck.CaptureProfile()));
 app.MapGet("/api/controls/task-output/{id}", (string id, ControlDeck deck) => Results.Text(deck.TaskOutput(id), "text/plain"));
 app.MapGet("/api/controls/spotify/state", async (SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Snapshot(ct)));
-app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Act(action, id, ct)));
+app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, ControlDeck deck, CancellationToken ct) =>
+{
+    var res = await spotify.Act(action, id, ct);
+    if (res.Ok && action is "play" or "play-queued" or "playlist") deck.StopAllRadios();
+    return Results.Json(res);
+});
 app.MapGet("/api/controls/spotify/connect", (SpotifyControl spotify) =>
 { try { return Results.Json(new { url = spotify.Begin(), redirectUri = spotify.RedirectUri }); } catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); } });
 app.MapPost("/api/controls/spotify/disconnect", async (SpotifyControl spotify, CancellationToken ct) => { await spotify.Disconnect(ct); return Results.Ok(); });
@@ -321,7 +326,7 @@ object State(IServiceProvider sp, long? ev)
         evSeq = push.Seq,
         events = ev is { } since ? push.Since(since) : [],
         pc = sp.GetRequiredService<SystemMonitor>().Snapshot(),
-        media = sp.GetRequiredService<MediaMonitor>().Snapshot(),
+        media = sp.GetRequiredService<ControlDeck>().EffectiveMedia(sp.GetRequiredService<MediaMonitor>().Snapshot()),
         audio = sp.GetRequiredService<AudioControl>().Snapshot(),
         ping = sp.GetRequiredService<PingMonitor>().Snapshot(),
         rules = sp.GetRequiredService<RuleEngine>().Active(),
@@ -486,8 +491,16 @@ app.MapGet("/api/phones", (ConfigStore cfg) =>
 app.MapGet("/api/art", (MediaMonitor media) =>
     media.Art is { } art ? Results.File(art.Bytes, art.Mime) : Results.NotFound());
 
-app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media) =>
-    await media.Control(action, ms) ? Results.Ok() : Results.BadRequest());
+app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media, ControlDeck deck, CancellationToken ct) =>
+{
+    var sysSnapshot = media.Snapshot();
+    if (await deck.TryControlRadioMediaAsync(action, sysSnapshot, ct) is { } radioHandled)
+        return radioHandled ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
+    var starting = action is "play" or "next" or "prev" || (action == "playpause" && sysSnapshot?.Playing != true);
+    var ok = await media.Control(action, ms);
+    if (ok && starting) deck.StopAllRadios();
+    return ok ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
+});
 
 app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
 {
