@@ -98,6 +98,16 @@ app.MapGet("/api/controls/spotify/callback", async (string? state, string? code,
 app.MapGet("/api/controls/obs", async (ObsMonitor obs, CancellationToken ct) => Results.Json(await obs.DeckSnapshot(ct)));
 app.MapPost("/api/controls/obs/{action}", async (string action, string? id, int? value, bool? enabled, ObsMonitor obs, CancellationToken ct) =>
     Results.Json(await obs.DeckAct(action, id, value, enabled, ct)));
+app.MapGet("/api/controls/radio-directory/countries", async (CancellationToken ct) =>
+    Results.Json(new { countries = await RadioBrowserDirectory.GetCountriesAsync(ct) }));
+app.MapGet("/api/controls/radio-directory/stations", async (string? country, int? limit, CancellationToken ct) =>
+    Results.Json(new { stations = await RadioBrowserDirectory.GetStationsByCountryAsync(country ?? "", limit ?? 40, ct) }));
+app.MapPost("/api/controls/radio-directory/check", async (HttpRequest req, CancellationToken ct) =>
+{
+    var body = await req.ReadFromJsonAsync<RadioCheckRequest>(new JsonSerializerOptions(JsonSerializerDefaults.Web), ct);
+    var results = await RadioBrowserDirectory.CheckStreamsAsync(body?.Stations ?? [], ct);
+    return Results.Json(new { results });
+});
 
 // The panel in a desktop browser (the layout editor's live preview, /panel/) calls the API as /agent/api/..., the same
 // path the phone uses; on the local port that is simply /api/... Routing runs after this, so it sees the new path.
