@@ -1267,6 +1267,102 @@ function renderStackWidgetsOption(w, o) {
   );
 }
 
+function renderRadioStationsOption(w, o) {
+  const c = cfg.controls ??= { actions: [], profiles: [] };
+  c.actions ??= [];
+  let filterText = '';
+  const listBox = h('div', { class: 'stack-list' });
+
+  const getRadios = () => c.actions.filter((a) => a.kind === 'radio');
+
+  const moveRadio = (fromRadioIdx, toRadioIdx) => {
+    const radios = getRadios();
+    if (fromRadioIdx < 0 || fromRadioIdx >= radios.length || toRadioIdx < 0 || toRadioIdx >= radios.length || fromRadioIdx === toRadioIdx) return;
+    const [moved] = radios.splice(fromRadioIdx, 1);
+    radios.splice(toRadioIdx, 0, moved);
+    let rPtr = 0;
+    c.actions = c.actions.map((a) => (a.kind === 'radio' ? radios[rPtr++] : a));
+    changed();
+    renderList();
+  };
+
+  const renderList = () => {
+    const radios = getRadios();
+    const q = filterText.trim().toLowerCase();
+    const visible = q ? radios.filter((r) => (r.label || r.id || '').toLowerCase().includes(q)) : radios;
+    if (!visible.length) {
+      listBox.replaceChildren(h('p', { class: 'hint', style: { margin: '6px 0' } }, radios.length ? 'No matching radio stations.' : 'No radio stations configured in Control Deck yet.'));
+      return;
+    }
+    listBox.replaceChildren(...visible.map((station) => {
+      const idx = radios.indexOf(station);
+      const isEnabled = station.enabled !== false;
+      const row = h('div', {
+        class: 'stack-row' + (isEnabled ? '' : ' off'),
+        draggable: !q ? 'true' : null,
+        ondragstart: (e) => {
+          if (q || e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') { e.preventDefault(); return; }
+          row.classList.add('dragging');
+          e.dataTransfer.setData('application/phonebox-radio-idx', String(idx));
+          e.dataTransfer.effectAllowed = 'move';
+        },
+        ondragend: () => {
+          row.classList.remove('dragging');
+          listBox.querySelectorAll('.stack-row.over').forEach((el) => el.classList.remove('over'));
+        },
+        ondragover: (e) => {
+          if (q) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          row.classList.add('over');
+        },
+        ondragleave: () => row.classList.remove('over'),
+        ondrop: (e) => {
+          if (q) return;
+          e.preventDefault();
+          e.stopPropagation();
+          row.classList.remove('over');
+          const fromIdx = parseInt(e.dataTransfer.getData('application/phonebox-radio-idx'), 10);
+          if (!Number.isNaN(fromIdx) && fromIdx !== idx) moveRadio(fromIdx, idx);
+        }
+      },
+        h('span', { class: 'stack-row-handle', title: q ? 'Clear search to drag' : 'Drag to reorder' }, '⋮⋮'),
+        h('input', {
+          type: 'checkbox',
+          class: 'stack-row-check',
+          checked: isEnabled,
+          title: isEnabled ? 'Enabled' : 'Disabled',
+          onchange: (e) => {
+            e.stopPropagation();
+            station.enabled = e.target.checked;
+            changed();
+            renderList();
+          }
+        }),
+        h('span', { class: 'stack-row-ico' }, '📻'),
+        h('span', { class: 'stack-row-name', title: station.target || '' }, station.label || station.id),
+        h('div', { class: 'stack-row-actions' },
+          h('button', { type: 'button', class: 'stack-btn-sm', title: 'Move up', disabled: !!q || idx === 0, onclick: (e) => { e.stopPropagation(); moveRadio(idx, idx - 1); } }, '▲'),
+          h('button', { type: 'button', class: 'stack-btn-sm', title: 'Move down', disabled: !!q || idx === radios.length - 1, onclick: (e) => { e.stopPropagation(); moveRadio(idx, idx + 1); } }, '▼')
+        )
+      );
+      return row;
+    }));
+  };
+
+  renderList();
+  return h('div', { class: 'field' },
+    h('label', {}, o.label || 'Radio stations'),
+    h('input', {
+      type: 'search',
+      placeholder: 'Filter stations…',
+      style: { marginBottom: '6px' },
+      oninput: (e) => { filterText = e.target.value; renderList(); }
+    }),
+    listBox
+  );
+}
+
 function optionField(w, o, onValChange) {
   if (o.type === 'stack-widgets' || (w.type === 'stack' && o.key === 'widgets')) {
     return renderStackWidgetsOption(w, o);
@@ -1276,6 +1372,9 @@ function optionField(w, o, onValChange) {
     if (onValChange) onValChange(key, val);
     else setWOpt(w, key, val);
   };
+  if (o.type === 'radio-stations') {
+    return renderRadioStationsOption(w, o);
+  }
   const field = (...kids) => h('div', { class: 'field' }, h('label', {}, o.label), ...kids);
   switch (o.type) {
     case 'bool':
@@ -1910,7 +2009,7 @@ function renderControlSettings() {
     const box=h('details',{},h('summary',{},a.label || a.id));
     const kind=h('select',{'aria-label':'Control kind'},...Object.keys(hints).map(k=>h('option',{value:k,selected:a.kind===k},k)));
     const hint=h('p',{class:'hint'},hints[a.kind] || 'Select a kind.');kind.onchange=()=>{a.kind=kind.value;hint.textContent=hints[a.kind];changed();};
-    box.append(field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
+    box.append(field('Enabled',a,'enabled','checkbox'),field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
     const output=h('pre',{style:{maxHeight:'240px',overflow:'auto',whiteSpace:'pre-wrap'}});
     box.append(btn('Show task output',async()=>{const r=await fetch('/api/controls/task-output/'+encodeURIComponent(a.id));if(!r.ok)throw new Error('Output unavailable');output.textContent=await r.text();}),btn('Remove control',()=>{c.actions=c.actions.filter(x=>x!==a);changed();renderActions();}),output);return box;
   }));renderActions();

@@ -19,7 +19,7 @@ public sealed class ControlDeckCommandTests
         public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct)=>Task.FromResult<IReadOnlyList<DeckMedia>>([new("Spotify.exe","Spotify","Track",true,0,100000,true,true,true,false,"None")]);
         public Task<bool> MediaAction(string id,string action,long value,CancellationToken ct){Writes.Add("media:"+action);return Task.FromResult(true);}
         public void Play(string id,string file,string? device,int volume){Writes.Add("sound:"+volume);}
-        public void StopSound(string? id){}
+        public void StopSound(string? id){Writes.Add("stop:"+(id ?? ""));}
         public IReadOnlyList<DeckItem> MidiPorts()=>[];
         public void Midi(int port,string message,int value){}
         public async IAsyncEnumerable<DeckAudioPacket> Listen([System.Runtime.CompilerServices.EnumeratorCancellation]CancellationToken ct){await Task.CompletedTask;yield break;}
@@ -99,5 +99,20 @@ public sealed class ControlDeckCommandTests
         f.Now+=45_000;await f.Deck.TickSleep(default);Assert.Equal(40,f.Native.Sessions[0].Volume);
         f.Native.Sessions[0]=f.Native.Sessions[0] with{Volume=65};
         f.Now+=15_000;await f.Deck.TickSleep(default);Assert.Equal(65,f.Native.Sessions[0].Volume);
+    }
+
+    [Fact]
+    public async Task DisabledControlIsHiddenRejectedAndStopped()
+    {
+        using var f=new Fixture("""{"actions":[{"id":"r1","label":"Station 1","kind":"radio","target":"https://example.com/1","value":80,"enabled":false},{"id":"r2","label":"Station 2","kind":"radio","target":"https://example.com/2","value":80,"enabled":true}]}""");
+        var snap=System.Text.Json.JsonSerializer.Serialize(await f.Deck.Snapshot(default));
+        Assert.DoesNotContain("\"r1\"",snap);
+        Assert.Contains("\"r2\"",snap);
+        var res=await f.Act("action","r1");
+        Assert.False(res.Ok);
+        Assert.Equal("Control is disabled",res.Error);
+        f.Deck.StopDisabledRadios();
+        Assert.Contains("stop:r1",f.Native.Writes);
+        Assert.DoesNotContain("stop:r2",f.Native.Writes);
     }
 }

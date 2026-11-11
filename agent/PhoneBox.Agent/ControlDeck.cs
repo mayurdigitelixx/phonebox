@@ -76,7 +76,7 @@ public sealed partial class ControlDeck : BackgroundService
         {
             platform = AppPaths.Os, audio = Audio(), media, mediaError,
             monitors = _monitors, powerPlans = _plans, midi = _midi, hardwareLoading = _hardwareJob?.IsCompleted == false,
-            actions = c.Controls.Actions.Select(Describe).ToArray(),
+            actions = c.Controls.Actions.Where(a => a.Enabled).Select(Describe).ToArray(),
             shortcuts = c.Shortcuts.Select(DescribeShortcut),
             profiles = c.Controls.Profiles.Select(p => new DeckItem(p.Id, p.Label, "profile")),
             allowListening = c.Controls.AllowListening, allowPower = c.Controls.AllowPower,
@@ -213,6 +213,12 @@ public sealed partial class ControlDeck : BackgroundService
         }
     }
 
+    public void StopDisabledRadios()
+    {
+        foreach (var a in _config.Get().Controls.Actions.Where(a => a.Kind == "radio" && !a.Enabled))
+            _native.StopSound(a.Id);
+    }
+
     private async Task<DeckResult> Action(string id, string op, int? value, CancellationToken ct)
     {
         var c = _config.Get();
@@ -220,6 +226,7 @@ public sealed partial class ControlDeck : BackgroundService
             return await ShortcutAction(c, id[9..], op, ct);
         var action = c.Controls.Actions.FirstOrDefault(a => a.Id == id);
         if (action is null) return new(false, "Choose a configured control in desktop settings");
+        if (!action.Enabled) return new(false, "Control is disabled");
         switch (action.Kind)
         {
             case "task": case "server": return _tasks.Start(action, op == "stop");
