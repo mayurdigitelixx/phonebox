@@ -329,10 +329,56 @@ W.quotas = {
       return ['claude', 'codex', 'antigravity'];
     };
 
+    const isOverviewEnabled = () => o.showOverview === true;
+
+    const getItems = () => {
+      const want = getProviders();
+      const items = quotaProviders().filter((p) => want.includes(p.id));
+      if (isOverviewEnabled() && D.quotas?.overview) {
+        return [{ id: '__overview__', isOverview: true, overview: D.quotas.overview }, ...items];
+      }
+      return items;
+    };
+
+    const renderOverviewCard = (ov, flexVal) => {
+      const card = h('div', 'q-card q-overview-card');
+      card.style.setProperty('--q', '#f97316');
+      card.style.flex = flexVal;
+      const days = ov.historyDays || 30;
+      const updStr = ov.updatedAt ? new Date(ov.updatedAt).toLocaleDateString(LOCALE, { month: 'short', day: 'numeric' }) : '';
+      card.appendChild(h('div', 'q-head',
+        h('span', 'q-logo', '📊'),
+        h('span', 'q-name', 'Overview'),
+        h('span', 'q-plan', `${days}-day spend`),
+        updStr ? h('span', 'q-upd', updStr) : null
+      ));
+      const summary = h('div', 'q-ov-hero',
+        h('div', 'q-ov-stat', h('span', 'q-ov-lbl', 'Estimated spend'), h('strong', 'q-ov-val', `$${Number(ov.totalCost30dUsd || 0).toFixed(2)}`)),
+        h('div', 'q-ov-stat', h('span', 'q-ov-lbl', 'Recorded tokens'), h('strong', 'q-ov-val', tokens(ov.totalTokens30d || 0)))
+      );
+      card.appendChild(summary);
+      const details = h('div', 'q-details q-ov-details');
+      for (const s of (ov.subscriptions || []).slice(0, 3)) {
+        details.appendChild(h('div', 'q-detail',
+          h('span', null, s.name),
+          h('strong', null, `${tokens(s.tokens30d)} · $${Number(s.cost30dUsd || 0).toFixed(2)}`)
+        ));
+      }
+      for (const m of (ov.topModels || []).slice(0, 2)) {
+        details.appendChild(h('div', 'q-detail q-breakdown',
+          h('span', null, m.modelName || m.name),
+          h('strong', null, `$${Number(m.cost30dUsd || 0).toFixed(2)}`)
+        ));
+      }
+      if (details.childNodes.length) card.appendChild(details);
+      card.appendChild(h('div', 'q-foot', h('span', null, `${ov.connectedCount || (ov.subscriptions || []).length} active subscriptions`), h('span')));
+      return card;
+    };
+
     const render = () => {
       if (!D.quotas) return;
       const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getItems();
       grid.replaceChildren();
       if (!list.length) { grid.appendChild(h('div', 'empty', want.length ? 'Quota data is unavailable for the selected providers' : 'No quota providers enabled')); return; }
 
@@ -349,6 +395,10 @@ W.quotas = {
       }
 
       for (const p of visible) {
+        if (p.isOverview) {
+          grid.appendChild(renderOverviewCard(p.overview, needsPaging && ps === 2 ? '1 1 0' : '1.5'));
+          continue;
+        }
         const st = Q_STYLE[p.id] || { color: '#94a3b8', logo: '●' };
         const card = h('div', 'q-card' + (p.limits.length >= 4 ? ' q-card-compact' : ''));
         card.style.setProperty('--q', st.color);
@@ -408,8 +458,7 @@ W.quotas = {
 
     grid.onclick = () => {
       const ps = getPageSize();
-      const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getItems();
       if (ps > 0 && list.length > ps) {
         offset = (offset + 1) % list.length;
         lastRotate = Date.now();
@@ -424,8 +473,7 @@ W.quotas = {
           const sec = getRotateInterval();
           if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
             const ps = getPageSize();
-            const want = getProviders();
-            const list = quotaProviders().filter((p) => want.includes(p.id));
+            const list = getItems();
             if (ps > 0 && list.length > ps) {
               offset = (offset + 1) % list.length;
               lastRotate = Date.now();
