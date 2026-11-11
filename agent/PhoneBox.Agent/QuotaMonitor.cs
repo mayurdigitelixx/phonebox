@@ -35,6 +35,7 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
     private long _nextCodexBar;
     private long _nextAntigravity;
     private volatile IReadOnlyList<QuotaProvider> _external = [];
+    private volatile QuotaOverview? _overview;
 
     public IReadOnlyList<QuotaProvider> Snapshot()
     {
@@ -55,6 +56,8 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
         return p with { Limits = limits, Extra = extra };
     }
 
+    public QuotaOverview? Overview() => _overview;
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("PhoneBox/" + AppPaths.Version);
@@ -72,6 +75,9 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
                         _external = latest.Select(p => p.Limits.Count == 0 && _external.FirstOrDefault(old => old.Id == p.Id) is { } cached
                             ? cached with { Error = p.Error ?? "CodexBar returned no data" } : p)
                             .Concat(_external.Where(old => !latest.Any(p => p.Id == old.Id)).Select(p => p with { Error = "CodexBar omitted this provider" })).ToList();
+                        try { _overview = await CodexBar.ReadCostAsync(path, ct) ?? _overview; }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                        catch (Exception ex) { log.LogDebug("CodexBar cost: {Message}", ex.Message); }
                     }
                     _nextCodexBar = Environment.TickCount64 + 180_000;
                 }

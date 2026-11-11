@@ -76,4 +76,57 @@ public sealed class CodexBarTests
         Assert.Equal("Opus", provider.Limits[2].Label);
         Assert.Equal(30, provider.Limits[2].Percent);
     }
+
+    [Fact]
+    public void ParsesCostOverviewAndAggregatesTopModelsAcrossDays()
+    {
+        var overview = CodexBar.ParseCost("""
+            [
+              {
+                "provider": "claude",
+                "last30DaysCostUSD": 42.5,
+                "last30DaysTokens": 1250000,
+                "sessionCostUSD": 1.25,
+                "sessionTokens": 35000,
+                "historyDays": 30,
+                "daily": [
+                  {
+                    "date": "2026-04-17",
+                    "totalCost": 20.0,
+                    "totalTokens": 600000,
+                    "modelBreakdowns": [
+                      { "modelName": "claude-sonnet-4-5", "cost": 15.0, "totalTokens": 500000 },
+                      { "modelName": "claude-opus-4-6", "cost": 5.0, "totalTokens": 100000 }
+                    ]
+                  },
+                  {
+                    "date": "2026-04-18",
+                    "totalCost": 22.5,
+                    "totalTokens": 650000,
+                    "modelBreakdowns": [
+                      { "modelName": "claude-sonnet-4-5", "cost": 22.5, "totalTokens": 650000 }
+                    ]
+                  }
+                ]
+              },
+              {
+                "provider": "codex",
+                "totals": { "totalCost": 18.0, "totalTokens": 800000 }
+              }
+            ]
+            """);
+
+        Assert.NotNull(overview);
+        Assert.Equal(2, overview.ConnectedCount);
+        Assert.Equal(60.5, overview.TotalCost30dUsd);
+        Assert.Equal(2050000, overview.TotalTokens30d);
+        Assert.Equal("claude", overview.Subscriptions[0].Id);
+        Assert.Equal(42.5, overview.Subscriptions[0].Cost30dUsd);
+        Assert.Equal("codex", overview.Subscriptions[1].Id);
+        Assert.Equal(18.0, overview.Subscriptions[1].Cost30dUsd);
+        Assert.Equal(2, overview.TopModels.Count);
+        Assert.Equal("claude-sonnet-4-5", overview.TopModels[0].ModelName);
+        Assert.Equal(37.5, overview.TopModels[0].Cost30dUsd);
+        Assert.Equal(1150000, overview.TopModels[0].Tokens30d);
+    }
 }

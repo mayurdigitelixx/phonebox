@@ -4,9 +4,35 @@ using System.Text.Json;
 
 namespace PhoneBox.Agent;
 
+public sealed record QuotaSubscriptionCost(string Id, string Name, long Tokens30d, double Cost30dUsd,
+    double SessionCostUsd = 0, long SessionTokens = 0);
+
+public sealed record QuotaTopModelCost(string ModelName, string ProviderId, string ProviderName,
+    double Cost30dUsd, long Tokens30d);
+
+public sealed record QuotaOverview(long TotalTokens30d, double TotalCost30dUsd, int HistoryDays,
+    int ConnectedCount, long UpdatedAt, IReadOnlyList<QuotaSubscriptionCost> Subscriptions,
+    IReadOnlyList<QuotaTopModelCost> TopModels);
+
 internal static class CodexBar
 {
-    private static readonly Dictionary<string, string> Names = new() { ["claude"] = "Claude", ["codex"] = "Codex", ["antigravity"] = "Antigravity" };
+    private static readonly Dictionary<string, string> Names = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["claude"] = "Claude",
+        ["codex"] = "Codex",
+        ["antigravity"] = "Antigravity",
+        ["cursor"] = "Cursor",
+        ["copilot"] = "Copilot",
+        ["gemini"] = "Gemini",
+        ["windsurf"] = "Windsurf",
+        ["zai"] = "z.ai",
+        ["openrouter"] = "OpenRouter",
+        ["deepseek"] = "DeepSeek",
+        ["perplexity"] = "Perplexity",
+        ["warp"] = "Warp",
+        ["kimi"] = "Kimi",
+        ["minimax"] = "MiniMax",
+    };
 
     public static async Task<IReadOnlyList<QuotaProvider>> ReadAsync(string path, CancellationToken ct)
     {
@@ -14,6 +40,79 @@ internal static class CodexBar
         start.ArgumentList.Add("usage"); start.ArgumentList.Add("--json");
         var result = await ToolProcess.RunAsync(start, TimeSpan.FromSeconds(25), ct);
         return Parse(result.Output, result.ExitCode);
+    }
+
+    public static async Task<QuotaOverview?> ReadCostAsync(string path, CancellationToken ct)
+    {
+        var start = new ProcessStartInfo(path);
+        start.ArgumentList.Add("cost"); start.ArgumentList.Add("--format"); start.ArgumentList.Add("json");
+        var result = await ToolProcess.RunAsync(start, TimeSpan.FromSeconds(25), ct);
+        return ParseCost(result.Output, result.ExitCode);
+    }
+
+    public static QuotaOverview? ParseCost(string json, int exitCode = 0)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) throw new JsonException("Expected a CodexBar cost array");
+        var subs = new List<QuotaSubscriptionCost>();
+        var models = new Dictionary<string, (string ModelName, string ProviderId, string ProviderName, double Cost, long Tokens)>(StringComparer.OrdinalIgnoreCase);
+        long totalTokens = 0;
+        double totalCost = 0;
+        var maxDays = 30;
+
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            var rawId = Str(item, "provider")?.Trim();
+            if (string.IsNullOrEmpty(rawId) || string.Equals(rawId, "cli", StringComparison.OrdinalIgnoreCase)) continue;
+            var id = rawId.ToLowerInvariant();
+            var name = Names.TryGetValue(id, out var known) ? known : Str(item, "displayName") ?? (char.ToUpperInvariant(rawId[0]) + rawId[1..]);
+            var totals = Prop(item, "totals");
+            var cost30 = Num(item, "last30DaysCostUSD") ?? Num(totals, "totalCost") ?? 0;
+            var tok30 = (long)(Num(item, "last30DaysTokens") ?? Num(totals, "totalTokens") ?? 0);
+            var sessCost = Num(item, "sessionCostUSD") ?? 0;
+            var sessTok = (long)(Num(item, "sessionTokens") ?? 0);
+            var histDays = (int)(Num(item, "historyDays") ?? 30);
+
+            var daily = Prop(item, "daily");
+            var hasDaily = daily.ValueKind == JsonValueKind.Array && daily.GetArrayLength() > 0;
+            if (cost30 <= 0 && tok30 <= 0 && !hasDaily) continue;
+
+            if (histDays > 0) maxDays = Math.Max(maxDays, histDays);
+            totalCost += cost30;
+            totalTokens += tok30;
+            subs.Add(new QuotaSubscriptionCost(id, name, tok30, cost30, sessCost, sessTok));
+
+            if (hasDaily)
+            {
+                foreach (var d in daily.EnumerateArray())
+                {
+                    var mb = Prop(d, "modelBreakdowns");
+                    if (mb.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var m in mb.EnumerateArray())
+                    {
+                        var mName = Str(m, "modelName")?.Trim();
+                        if (string.IsNullOrEmpty(mName)) continue;
+                        var mCost = Num(m, "cost") ?? 0;
+                        var mTok = (long)(Num(m, "totalTokens") ?? 0);
+                        var key = $"{id}:{mName}";
+                        if (!models.TryGetValue(key, out var cur))
+                            cur = (mName, id, name, 0, 0);
+                        models[key] = (cur.ModelName, cur.ProviderId, cur.ProviderName, cur.Cost + mCost, cur.Tokens + mTok);
+                    }
+                }
+            }
+        }
+
+        if (exitCode != 0 && subs.Count == 0) throw new IOException("CodexBar cost exited with code " + exitCode);
+        var sortedSubs = subs.OrderByDescending(s => s.Cost30dUsd).ThenByDescending(s => s.Tokens30d).ToList();
+        var topModels = models.Values
+            .OrderByDescending(m => m.Cost)
+            .ThenByDescending(m => m.Tokens)
+            .Take(6)
+            .Select(m => new QuotaTopModelCost(m.ModelName, m.ProviderId, m.ProviderName, m.Cost, m.Tokens))
+            .ToList();
+        return new QuotaOverview(totalTokens, totalCost, maxDays, sortedSubs.Count,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), sortedSubs, topModels);
     }
 
     public static IReadOnlyList<QuotaProvider> Parse(string json, int exitCode = 0)
