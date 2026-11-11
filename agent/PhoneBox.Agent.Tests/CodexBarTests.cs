@@ -76,4 +76,43 @@ public sealed class CodexBarTests
         Assert.Equal("Opus", provider.Limits[2].Label);
         Assert.Equal(30, provider.Limits[2].Percent);
     }
+
+    /// <summary>
+    /// Verifies that provider-level pace metadata, reset descriptions, and additional providers are parsed.
+    /// </summary>
+    [Fact]
+    public void ParsesResetDescriptionPaceAndAdditionalProviders()
+    {
+        var providers = CodexBar.Parse("""
+            [{"provider":"cursor","pace":{"primary":{"deltaPercent":-8.5,"expectedUsedPercent":50.5,"onTrack":true}},
+              "usage":{"loginMethod":"Pro","primary":{
+                "usedPercent":42,
+                "windowMinutes":10080,
+                "resetDescription":"Resets Sunday 12:00"
+            }}},
+            {"provider":"custom_ai","displayName":"Custom AI","pace":{"primary":{"pacePercent":12,"expectedUsedPercent":63}},
+             "usage":{"primary":{
+                "usedPercent":75
+            }}}]
+            """);
+        Assert.Equal(2, providers.Count);
+
+        var cursor = providers[0];
+        Assert.Equal("cursor", cursor.Id);
+        Assert.Equal("Cursor", cursor.Name);
+        Assert.Equal("Pro", cursor.Plan);
+        var limit = Assert.Single(cursor.Limits);
+        Assert.Equal("Resets Sunday 12:00", limit.ResetDescription);
+        Assert.Equal(-8.5, limit.PacePercent);
+        Assert.Equal(50.5, limit.ExpectedPercent);
+        Assert.True(limit.PaceOnTrack);
+
+        var custom = providers[1];
+        Assert.Equal("custom_ai", custom.Id);
+        Assert.Equal("Custom AI", custom.Name);
+        var customLimit = Assert.Single(custom.Limits);
+        Assert.Equal(12, customLimit.PacePercent);
+        Assert.Equal(63, customLimit.ExpectedPercent);
+        Assert.False(customLimit.PaceOnTrack);
+    }
 }
