@@ -947,6 +947,30 @@ body.night #night { display: flex; }
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.85);
 }
+.stack-dots.paused {
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  background: rgba(20, 16, 8, 0.72);
+}
+.stack-dots.paused .stack-dot.active {
+  background: #f59e0b;
+}
+.stack-pause {
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  min-width: 18px;
+  min-height: 16px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.stack-pause.on {
+  color: #f59e0b;
+}
 
 
 

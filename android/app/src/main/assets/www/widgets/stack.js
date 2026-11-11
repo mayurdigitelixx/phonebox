@@ -55,6 +55,9 @@ function parseWidgets(raw) {
 
 W.stack = {
   needs: ['tick'],
+  /**
+   * Creates the Smart Stack widget instance with rotation, swipe, and pause controls.
+   */
   create(box, ctx) {
     const o = ctx.o || {};
     const subDefs = parseWidgets(o.widgets);
@@ -109,8 +112,36 @@ W.stack = {
 
     let currentIndex = 0;
     let lastRotate = Date.now();
+    let paused = false;
     let destroyed = false;
     let dots = null;
+    let pauseBtn = null;
+
+    /**
+     * Synchronizes DOM attributes and pause indicator state with `paused`.
+     */
+    function syncPauseUi() {
+      if (paused) box.dataset.stackPaused = '1';
+      else delete box.dataset.stackPaused;
+      if (dots) dots.classList.toggle('paused', paused);
+      if (pauseBtn) {
+        pauseBtn.classList.toggle('on', paused);
+        pauseBtn.setAttribute('aria-pressed', String(paused));
+        pauseBtn.setAttribute('aria-label', paused ? 'Resume stack rotation' : 'Pause stack rotation');
+        pauseBtn.title = paused ? 'Rotation paused (tap to resume)' : 'Pause rotation';
+      }
+    }
+
+    /**
+     * Toggles the stack rotation paused state and resets the rotation timer.
+     */
+    function togglePaused() {
+      if (children.length <= 1 || !dots) return;
+      paused = !paused;
+      lastRotate = Date.now();
+      syncPauseUi();
+      haptic();
+    }
 
     function goTo(nextIdx, dir = 'next') {
       if (children.length <= 1) return;
@@ -135,7 +166,7 @@ W.stack = {
       currentIndex = target;
 
       if (dots) {
-        [...dots.children].forEach((d, idx) => {
+        dots.querySelectorAll('.stack-dot').forEach((d, idx) => {
           d.classList.toggle('active', idx === currentIndex);
           d.classList.toggle('on', idx === currentIndex);
         });
@@ -161,14 +192,53 @@ W.stack = {
         });
         dots.appendChild(dot);
       });
+      pauseBtn = h('button', 'stack-pause', '⏸');
+      pauseBtn.type = 'button';
+      pauseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        togglePaused();
+      });
+      dots.appendChild(pauseBtn);
+      syncPauseUi();
       box.appendChild(dots);
+    }
+
+    // Hold on non-interactive stack surface or dots bar (when >1 child and dots shown) toggles rotation pause.
+    const INTERACTIVE_SEL = 'button, input, textarea, select, a, label, [role="button"], [role="slider"], [contenteditable], .s-list, .deck-hold, .deck-slider, .vol-bar, .q-grid, .w-media .bar, .w-volume .vb';
+    let holdTimer = 0, holdStart = null, heldDots = false;
+    const clearHold = () => {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; }
+      holdStart = null;
+    };
+    box.addEventListener('pointerdown', (e) => {
+      if (children.length <= 1 || !dots || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      const onDots = dots.contains(e.target) && !e.target.closest('.stack-pause');
+      if (!onDots && e.target.closest(INTERACTIVE_SEL)) return;
+      clearHold();
+      heldDots = false;
+      holdStart = [e.clientX, e.clientY];
+      holdTimer = setTimeout(() => {
+        holdTimer = 0;
+        holdStart = null;
+        heldDots = onDots;
+        togglePaused();
+      }, 450);
+    });
+    box.addEventListener('pointermove', (e) => {
+      if (holdStart && Math.hypot(e.clientX - holdStart[0], e.clientY - holdStart[1]) > 10) clearHold();
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => box.addEventListener(ev, clearHold));
+    if (dots) {
+      dots.addEventListener('click', (e) => {
+        if (heldDots) { heldDots = false; e.preventDefault(); e.stopPropagation(); }
+      }, true);
     }
 
     // Vertical swipes cycle the stack; horizontal swipes remain page navigation.
     wrap.style.touchAction = 'pan-x';
     let startX = 0, startY = 0, startT = 0, swiping = false;
     wrap.addEventListener('touchstart', (e) => {
-      swiping = e.touches.length === 1 && !e.target.closest('button, input, textarea, select, a, [contenteditable], .s-list');
+      swiping = e.touches.length === 1 && !e.target.closest(INTERACTIVE_SEL);
       if (!swiping) return;
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
@@ -204,13 +274,17 @@ W.stack = {
 
     return {
       needs: Array.from(collectedNeeds),
+      /**
+       * Handles periodic tick and widget data updates for the stack and its children.
+       */
       update(kind) {
         if (destroyed) return;
         if (kind === 'tick') {
           const r = box.getBoundingClientRect();
           const visible = r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight && !document.hidden;
-          if (!visible) lastRotate = Date.now();
-          else if (Date.now() - lastRotate >= intervalSec * 1000 && !box.contains(document.activeElement)) {
+          const activeChildEl = children[currentIndex]?.el;
+          if (!visible || paused) lastRotate = Date.now();
+          else if (Date.now() - lastRotate >= intervalSec * 1000 && !activeChildEl?.contains(document.activeElement)) {
             goTo(currentIndex + 1, 'next');
             lastRotate = Date.now();
           }
@@ -221,8 +295,13 @@ W.stack = {
           }
         }
       },
+      /**
+       * Cleans up timers, DOM state, and child widget instances.
+       */
       destroy() {
         destroyed = true;
+        clearHold();
+        delete box.dataset.stackPaused;
         for (const child of children) {
           try { child.inst.destroy?.(); } catch (_) {}
         }
