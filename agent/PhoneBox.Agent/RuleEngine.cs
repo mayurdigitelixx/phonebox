@@ -234,6 +234,7 @@ public sealed class RuleEngine(ConfigStore config, PushStore push, SessionMonito
                 var limit = r.Value ?? 80;
                 foreach (var q in quotas.Snapshot())
                 {
+                    if (q.Error is not null) continue;
                     if (names.Length > 0 && !names.Any(n => q.Id.Contains(n, StringComparison.OrdinalIgnoreCase) || q.Name.Contains(n, StringComparison.OrdinalIgnoreCase))) continue;
                     var hit = q.Limits.Where(l => l.Percent >= limit).OrderByDescending(l => l.Percent).FirstOrDefault();
                     if (hit is not null) return (true, $"{q.Name} {hit.Label} {hit.Percent:0}%");
